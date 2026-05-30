@@ -26,8 +26,19 @@ def generate_curriculum(
     num_questions: int,
     output_dir: str,
     api_key: str,
-    error_threshold: int = 10,
-    sleep_threshold: int = 60,   
+    # kg-pipeline fork-patch: error_threshold default bumped 10 → 50 because
+    # specialty-density KGs (e.g. topic-curated diabetes 300) trigger the
+    # quality-filter "Options are near duplicates" rejection at ~35% rate —
+    # distractors from a narrow KG vocabulary look similar to the answer.
+    # Also see semantics change below: error_window now resets on success
+    # so it's "consecutive errors" not "total errors over the run."
+    # Honor BUS_ERROR_THRESHOLD env var for further tuning.
+    error_threshold: int = int(os.environ.get("BUS_ERROR_THRESHOLD", "50")),
+    # kg-pipeline fork-patch: the original default of 60 was set for free-tier
+    # Gemini (10 RPM). On paid tier (1000+ RPM) this is ~120x overkill and
+    # makes a 100-question run take ~2 hours instead of ~15 minutes. Default
+    # to 5; honor BUS_PER_Q_SLEEP env var for further tuning.
+    sleep_threshold: int = int(os.environ.get("BUS_PER_Q_SLEEP", "5")),
     ) -> None:
     """
     Generate a dataset of medical questions, explanations, and answers from the UMLS KG and save them locally.
@@ -105,6 +116,11 @@ def generate_curriculum(
                     json.dump(qa_gym.generator.vocab_freq, f, indent=2)
                     
             question_idx += 1
+            # kg-pipeline fork-patch: reset on success so error_window measures
+            # *consecutive* errors, not total over the run. Without this, a
+            # specialty-domain run accumulates ~35% rejects over many successes
+            # and aborts even when it's making steady progress.
+            error_window = 0
             for path in question_data['paths']:
                 qa_gym.generator.vocab_freq[path['start']] += 1
                 

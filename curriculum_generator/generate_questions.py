@@ -65,9 +65,25 @@ class PathGenerator:
         with open(path, 'r') as f:
             return json.load(f)
 
+    def _resolve_relation(self, rel) -> str:
+        """Resolve an edge's `rel` attribute to a relation-name string.
+
+        Accepts two shapes:
+          - int: index into self.merged_relations. Indices >= len(merged_relations)
+                 are the upstream's "inverse" encoding — wrap back into range.
+                 (Original DDB KG ships this shape.)
+          - str: the relation name itself, possibly prefixed with "inverse_" by
+                 the kg-pipeline csv-to-kg adapter for reverse edges.
+        """
+        if isinstance(rel, int):
+            if rel >= len(self.merged_relations):
+                rel = rel - len(self.merged_relations)
+            return self.merged_relations[rel]
+        return rel  # string-native KGs (kg-pipeline adapter output)
+
     def _get_k_hop_neighbors(self, start_node: int, k: int) -> Tuple[List[Tuple[int, int, str]], bool]:
         """Get k-hop neighbors and their relationships from start_node.
-        
+
         Returns:
             Tuple containing:
             - List of (start_node, end_node, relation) tuples
@@ -76,32 +92,27 @@ class PathGenerator:
         paths = []
         all_nodes = set([start_node])
         current_node = start_node
-        
+
         for hop in range(k):
             neighbors = list(self.graph.neighbors(current_node))
             # Filter out neighbors with unwanted relations
             filtered_neighbors = []
             for n in neighbors:
-                rel = self.graph[current_node][n][0]['rel']
-                if rel >= len(self.merged_relations):
-                    rel = rel - len(self.merged_relations)
-                relation = self.merged_relations[rel]
+                relation = self._resolve_relation(self.graph[current_node][n][0]['rel'])
                 if relation not in ['belongs_to_the_category_of', 'is_a_category', 'is_a_subtype_of']:
                     filtered_neighbors.append(n)
             neighbors = filtered_neighbors
             available_neighbors = [n for n in neighbors if n not in all_nodes]
-            
+
             if not available_neighbors:
                 return [], False  # No valid neighbors left, signal failure
-                
+
             neighbor = random.choice(available_neighbors)
             all_nodes.add(neighbor)
-            rel = self.graph[current_node][neighbor][0]['rel']
-            if rel >= len(self.merged_relations):
-                rel = rel - len(self.merged_relations)
-            paths.append((current_node, neighbor, self.merged_relations[rel]))
+            relation = self._resolve_relation(self.graph[current_node][neighbor][0]['rel'])
+            paths.append((current_node, neighbor, relation))
             current_node = neighbor
-            
+
         return paths, True
 
     def generate_paths(self, category, k_hops: int = 1) -> Dict:
@@ -151,10 +162,19 @@ class PathGenerator:
         raise ValueError(f"Could not find valid path after {max_attempts} attempts")
     
 class GeminiLLMBackend:
-    def __init__(self, model_name_question: str = 'gemini-2.0-flash', model_name_explanation: str = 'gemini-2.5-flash-preview-05-20'):
-        self.api_key = os.getenv('GOOGLE_API_KEY')
+    # Upstream defaults ('gemini-2.0-flash', 'gemini-2.5-flash-preview-05-20')
+    # were retired by Google — 2.0-flash returns "no longer available to new
+    # users" and the dated preview is gone entirely, both surfacing as a
+    # misleading "API key not valid" via the SDK. Use env-overridable defaults
+    # that point at currently-available models.
+    def __init__(
+        self,
+        model_name_question: str = os.getenv('BUS_GEMINI_MODEL_QUESTION', 'gemini-2.5-flash'),
+        model_name_explanation: str = os.getenv('BUS_GEMINI_MODEL_EXPLANATION', 'gemini-2.5-flash'),
+    ):
+        self.api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
         if not self.api_key:
-            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+            raise ValueError("Neither GOOGLE_API_KEY nor GEMINI_API_KEY found in environment variables")
             
         self.client =genai.Client(api_key=self.api_key)
         self.model_question = model_name_question
@@ -345,10 +365,23 @@ class QAGenerator:
             raise ValueError("GOOGLE_API_KEY is required")
         os.environ['GOOGLE_API_KEY'] = api_key
         base_dir = os.path.dirname(__file__)
+        # Upstream nested vocab.txt + ddb.graph under data_kg/data_preprocessed_biomed/ddb/
+        # for their bundled DDB paper KG. kg-pipeline's csv-to-kg adapter writes
+        # those two files directly under data_kg/. Prefer the flat layout when
+        # present so adapter outputs win; fall back to the nested upstream paths
+        # so stand-alone bus usage with the bundled DDB KG still works.
+        data_kg = os.path.join(base_dir, 'data_kg')
+        nested = os.path.join(data_kg, 'data_preprocessed_biomed', 'ddb')
+        vocab_path = os.path.join(data_kg, 'vocab.txt')
+        graph_path = os.path.join(data_kg, 'ddb.graph')
+        if not os.path.exists(vocab_path):
+            vocab_path = os.path.join(nested, 'vocab.txt')
+        if not os.path.exists(graph_path):
+            graph_path = os.path.join(nested, 'ddb.graph')
         self.generator = PathGenerator(
-            vocab_path=os.path.join(base_dir, 'data_kg', 'data_preprocessed_biomed', 'ddb', 'vocab.txt'),
-            graph_path=os.path.join(base_dir, 'data_kg', 'data_preprocessed_biomed', 'ddb', 'ddb.graph'),
-            icd10_categories_path=os.path.join(base_dir, 'data_kg', 'icd10_categories.json')
+            vocab_path=vocab_path,
+            graph_path=graph_path,
+            icd10_categories_path=os.path.join(data_kg, 'icd10_categories.json'),
         )
 
         self.llm = GeminiLLMBackend()

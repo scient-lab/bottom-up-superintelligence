@@ -36,12 +36,18 @@ def ApplyTemplate(question_item, tokenizer):
 
 def main(args):
     # load tokenizer from cache
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/QwQ-32B", cache_dir='/projects/JHA/.cache/huggingface/hub')
+    tokenizer = AutoTokenizer.from_pretrained(os.environ.get('BUS_MODEL_NAME', 'Qwen/Qwen3-4B'), cache_dir=os.environ.get('HF_HOME', None))
     with open(args.dataset_train_path, "r") as f:
         questions_train = json.load(f)
 
+    # kg-pipeline fork-patch: upstream `generate_curriculum.py` doesn't emit
+    # a 'category' field (kg-pipeline's csv_to_kg adapter writes a single dummy
+    # 'smoke_unsorted' category for all concepts). `.get(..., default)` keeps
+    # the schema present for downstream code that expects it, without crashing
+    # on KeyError. Real paper-scale runs likely have a separate categorization
+    # step that backfills this field.
     questions_dict = {
-            'category': [question['category'] for question in questions_train],
+            'category': [question.get('category', 'smoke_unsorted') for question in questions_train],
             'source_concept': [question['source_concept'] for question in questions_train],
             'target_concept': [question['target_concept'] for question in questions_train],
             'paths': [question['paths'] for question in questions_train],

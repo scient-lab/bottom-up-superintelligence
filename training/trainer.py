@@ -197,13 +197,18 @@ def train():
     args.dataset_text_field = 'text'
     args.max_seq_length = config.block_size
     
+    # kg-pipeline fork-patch: in TRL >=0.18, passing a pre-wrapped PeftModel
+    # AND `peft_config` raises:
+    #   ValueError: You passed a `PeftModel` instance together with a
+    #   `peft_config` to the trainer. Please first merge and unload ...
+    # The upstream code already calls get_peft_model(model, lora_config) above,
+    # so the model is a PeftModel — drop the redundant peft_config arg.
     trainer = trl.SFTTrainer(
         model,
         train_dataset=dataset['train'],
         eval_dataset=dataset['test'] if 'test' in dataset else dataset['train'],
         args=args,
         data_collator=collator,
-        peft_config=lora_config if config.use_lora else None
     )
 
     trainer.train()

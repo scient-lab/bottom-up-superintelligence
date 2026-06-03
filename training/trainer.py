@@ -20,16 +20,94 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 from datasets import load_from_disk
 import transformers
 import trl
-# kg-pipeline fork-patch: in TRL >=0.16 `DataCollatorForCompletionOnlyLM`
-# was dropped from the top-level lazy-export module (you get
-# `AttributeError: module trl has no attribute DataCollatorForCompletionOnlyLM`
-# at `trl.DataCollatorForCompletionOnlyLM(...)`). It's still present in
-# `trl.trainer.utils`. Fall back to that path if the top-level export is
-# gone.
-try:
-    from trl import DataCollatorForCompletionOnlyLM
-except (ImportError, AttributeError):
-    from trl.trainer.utils import DataCollatorForCompletionOnlyLM
+# kg-pipeline fork-patch: `DataCollatorForCompletionOnlyLM` was dropped from
+# trl's top-level exports in 0.16 and removed entirely (incl. from
+# `trl.trainer.utils`) in 0.18+. Rather than pin trl backward — which would
+# force a transformers downgrade and break Stage 3 — vendor the class here.
+# Behavior identical to trl 0.17's version: mask all non-assistant tokens
+# with -100 so loss is computed only over assistant responses.
+import numpy as np
+import warnings
+from typing import List, Optional, Union
+from transformers import DataCollatorForLanguageModeling
+
+class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
+    def __init__(
+        self,
+        response_template: Union[str, List[int]],
+        instruction_template: Optional[Union[str, List[int]]] = None,
+        *args,
+        mlm: bool = False,
+        ignore_index: int = -100,
+        **kwargs,
+    ):
+        super().__init__(*args, mlm=mlm, **kwargs)
+        self.instruction_template = instruction_template
+        if isinstance(instruction_template, str):
+            self.instruction_token_ids = self.tokenizer.encode(
+                self.instruction_template, add_special_tokens=False
+            )
+        else:
+            self.instruction_token_ids = instruction_template
+        self.response_template = response_template
+        if isinstance(response_template, str):
+            self.response_token_ids = self.tokenizer.encode(
+                self.response_template, add_special_tokens=False
+            )
+        else:
+            self.response_token_ids = response_template
+        self.ignore_index = ignore_index
+
+    def torch_call(self, examples):
+        batch = super().torch_call(examples)
+        for i in range(len(examples)):
+            response_token_ids_idxs = []
+            human_token_ids_idxs = []
+            labels_i = batch["labels"][i]
+            for assistant_idx in np.where(labels_i == self.response_token_ids[0])[0]:
+                if (
+                    self.response_token_ids
+                    == labels_i[assistant_idx : assistant_idx + len(self.response_token_ids)].tolist()
+                ):
+                    response_token_ids_idxs.append(assistant_idx + len(self.response_token_ids))
+            if len(response_token_ids_idxs) == 0:
+                warnings.warn(
+                    f"Could not find response key `{self.response_template}` in instance — "
+                    "loss will be ignored for it. Increase max_seq_length if frequent."
+                )
+                batch["labels"][i, :] = self.ignore_index
+                continue
+            if self.instruction_template is not None:
+                human_token_ids = self.instruction_token_ids
+                for human_idx in np.where(labels_i == human_token_ids[0])[0]:
+                    if (
+                        human_token_ids
+                        == labels_i[human_idx : human_idx + len(human_token_ids)].tolist()
+                    ):
+                        human_token_ids_idxs.append(human_idx)
+                if len(human_token_ids_idxs) == 0:
+                    warnings.warn(
+                        f"Could not find instruction key `{self.instruction_template}` — "
+                        "loss will be ignored for this instance."
+                    )
+                    batch["labels"][i, :] = self.ignore_index
+                    continue
+                if human_token_ids_idxs[0] > response_token_ids_idxs[0]:
+                    human_token_ids_idxs = [0] + human_token_ids_idxs
+                for idx, (start, end) in enumerate(
+                    zip(human_token_ids_idxs, response_token_ids_idxs)
+                ):
+                    if idx != 0:
+                        batch["labels"][i, start:end] = self.ignore_index
+                    else:
+                        batch["labels"][i, :end] = self.ignore_index
+                if len(response_token_ids_idxs) < len(human_token_ids_idxs):
+                    batch["labels"][i, human_token_ids_idxs[-1] :] = self.ignore_index
+            else:
+                response_token_ids_end_idx = response_token_ids_idxs[0]
+                batch["labels"][i, :response_token_ids_end_idx] = self.ignore_index
+        return batch
+
 from huggingface_hub import HfApi
 from socket import gethostname
 from peft import LoraConfig, get_peft_model, TaskType

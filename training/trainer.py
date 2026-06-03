@@ -90,7 +90,10 @@ def train():
        
     dataset = load_from_disk(config.train_dataset_path)
     # setting up trainer
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, use_fast=True)
+    # kg-pipeline fork-patch: upstream references undefined `model_path` here
+    # (NameError at runtime). Use config.model_name — same value the model
+    # load above used, so tokenizer matches the model.
+    tokenizer = transformers.AutoTokenizer.from_pretrained(config.model_name, use_fast=True)
 
     instruction_template = "<|im_start|>user\n"
     response_template = "<|im_start|>assistant\n"

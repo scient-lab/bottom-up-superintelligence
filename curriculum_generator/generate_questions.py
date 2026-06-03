@@ -10,11 +10,33 @@ import networkx as nx
 import json
 import random
 import pickle
+import time
 from typing import List, Dict, Tuple
 from google import genai
 from typing import Optional
 import os
 import re
+
+
+def _retry_503(fn, *args, max_retries=6, base_delay=1.0, **kwargs):
+    """Retry a Gemini call on 503/UNAVAILABLE/overloaded errors with exponential backoff.
+
+    Delays: 1, 2, 4, 8, 16, 32 sec (max ~1 min total wait across 6 attempts).
+    Re-raises immediately on non-503 errors so the caller's except: still catches
+    them as before (preserves existing "Error generating question" semantics for
+    real failures like auth, malformed prompts, model unavailable for the project).
+    """
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            msg = str(e)
+            is_503 = "503" in msg or "UNAVAILABLE" in msg or "overloaded" in msg.lower()
+            if not is_503 or attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"  Gemini 503 — retrying in {delay:.0f}s (attempt {attempt+1}/{max_retries})")
+            time.sleep(delay)
 
 class PathGenerator:
     def __init__(self, vocab_path: str, graph_path: str, icd10_categories_path: str, vocab_freq_path: str = None):
@@ -218,7 +240,8 @@ class GeminiLLMBackend:
         <Answer> [Correct Option Letter] </Answer>
         """
         try:
-            response = self.client.models.generate_content(
+            response = _retry_503(
+                self.client.models.generate_content,
                 model = self.model_question,
                 contents = prompt
             )
@@ -263,7 +286,8 @@ class GeminiLLMBackend:
         Check the question: {question}
         """
         try:
-            response = self.client.models.generate_content(
+            response = _retry_503(
+                self.client.models.generate_content,
                 model = self.model_question,
                 contents = prompt
             )
@@ -293,7 +317,8 @@ class GeminiLLMBackend:
         4. Your explanation should sound like a medical student explaining to a peer.
         """
         try:
-            response = self.client.models.generate_content(
+            response = _retry_503(
+                self.client.models.generate_content,
                 model = self.model_explanation,
                 contents = prompt,
             )
@@ -331,12 +356,22 @@ class GeminiLLMBackend:
         Source: {paths_str}
         """
     
-        response = self.client.models.generate_content(
-            model = self.model_explanation,
-            contents = prompt
-        )   
+        # NOTE: this first call's result is immediately overwritten by the
+        # second call below (pre-existing upstream bug — wastes ~half the
+        # correctness-filter Gemini budget). Wrapping in retry too so 503s
+        # don't crash the whole filter. Worth filing as a separate fix.
         try:
-            response = self.client.models.generate_content(
+            response = _retry_503(
+                self.client.models.generate_content,
+                model = self.model_explanation,
+                contents = prompt
+            )
+        except Exception as e:
+            print(f"Error correcting (first call): {e}")
+            return None
+        try:
+            response = _retry_503(
+                self.client.models.generate_content,
                 model = self.model_question,
                 contents = prompt
             )

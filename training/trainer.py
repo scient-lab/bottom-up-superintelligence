@@ -43,8 +43,17 @@ class TrainingConfig:
     lora_alpha: int = field(default=16)
     lora_dropout: float = field(default=0.05)
     lora_target_modules: List[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
-    push_to_hub: bool = field(default=False)
-    hub_repo_id: str = field(default="bottom_up_suerintelligence/med-3")
+    # kg-pipeline fork-patch: removed `push_to_hub` and `hub_repo_id` fields
+    # from TrainingConfig. They were never used by the driver (which doesn't
+    # pass --push_to_hub / --hub_repo_id), and trl.SFTConfig already inherits
+    # both from transformers.TrainingArguments. With newer transformers
+    # (>=4.46) registering both --push_to_hub and --push-to-hub as aliases
+    # for each dataclass field, having the same field on two dataclasses in
+    # HfArgumentParser((TrainingConfig, trl.SFTConfig)) raises:
+    #   argparse.ArgumentError: conflicting option strings: --push_to_hub,
+    #   --push-to-hub
+    # If you want to push to HF Hub, pass --push_to_hub=True --hub_model_id=...
+    # directly — SFTConfig handles it.
 
     def __post_init__(self):
         os.environ['WANDB_PROJECT'] = self.wandb_project

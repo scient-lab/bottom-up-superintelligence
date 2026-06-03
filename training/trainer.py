@@ -20,6 +20,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 from datasets import load_from_disk
 import transformers
 import trl
+# kg-pipeline fork-patch: in TRL >=0.16 `DataCollatorForCompletionOnlyLM`
+# was dropped from the top-level lazy-export module (you get
+# `AttributeError: module trl has no attribute DataCollatorForCompletionOnlyLM`
+# at `trl.DataCollatorForCompletionOnlyLM(...)`). It's still present in
+# `trl.trainer.utils`. Fall back to that path if the top-level export is
+# gone.
+try:
+    from trl import DataCollatorForCompletionOnlyLM
+except (ImportError, AttributeError):
+    from trl.trainer.utils import DataCollatorForCompletionOnlyLM
 from huggingface_hub import HfApi
 from socket import gethostname
 from peft import LoraConfig, get_peft_model, TaskType
@@ -100,7 +110,7 @@ def train():
     # Use a token that is never used
     tokenizer.add_special_tokens({'pad_token': '<|fim_pad|>'})
     # Only compute loss over assistant responses
-    collator = trl.DataCollatorForCompletionOnlyLM(
+    collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template,
         tokenizer=tokenizer,
         mlm=False,
